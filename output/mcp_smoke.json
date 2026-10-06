@@ -1,0 +1,51 @@
+{
+  "note": "Registered the server in .mcp.json, but a brand-new MCP server entry is only picked up by Claude Code on session start/reconnect, not mid-session. To actually exercise the tools now, we ran a real FastMCP stdio client against mcp_server/server.py — the same connection mechanism Claude Code uses — and called list_tools()/call_tool() exactly as the vibe coder would. This session should reconnect to campus-customs on next restart so the tools show up natively.",
+  "db_file_tested_against": "data/campus_customs_new.db",
+  "tests": [
+    {
+      "prompt": "Call the check_inventory tool for sku=CC-TEE-WHITE, size=S and show me the result.",
+      "tool": "check_inventory",
+      "arguments": { "sku": "CC-TEE-WHITE", "size": "S" },
+      "output": {
+        "sku": "CC-TEE-WHITE",
+        "name": "Classic Bulldog Tee",
+        "size": "S",
+        "qty": 0,
+        "location": "Aisle B",
+        "found": true
+      },
+      "matches_database": true,
+      "verification": "sqlite3 data/campus_customs_new.db \"select * from inventory where sku='CC-TEE-WHITE' and size='S';\" returns the same row (qty=0, location=Aisle B)."
+    },
+    {
+      "prompt": "Call the get_lease_info tool for lease_id=1 and show me the result.",
+      "tool": "get_lease_info",
+      "arguments": { "lease_id": 1 },
+      "output": {
+        "id": 1,
+        "space_name": "Chapel Street shop",
+        "landlord": "Elm City Properties",
+        "monthly_rent": 2400.0,
+        "next_due": "2026-09-02",
+        "notes": null,
+        "date_today": "2026-08-31",
+        "found": true
+      },
+      "matches_database": true,
+      "verification": "sqlite3 data/campus_customs_new.db \"select * from leases where id=1;\" and \"select date_today from desk;\" match monthly_rent=2400.0, next_due=2026-09-02, date_today=2026-08-31."
+    },
+    {
+      "prompt": "Call the get_pricing tool for sku=CC-HOOD-NAVY and show me the result.",
+      "tool": "get_pricing",
+      "arguments": { "sku": "CC-HOOD-NAVY" },
+      "output": {
+        "sku": "CC-HOOD-NAVY",
+        "unit_cost": 22.0,
+        "list_price": 58.0,
+        "found": true
+      },
+      "matches_database": true,
+      "verification": "sqlite3 data/campus_customs_new.db \"select * from pricing where sku='CC-HOOD-NAVY';\" returns unit_cost=22.0, list_price=58.0."
+    }
+  ]
+}
