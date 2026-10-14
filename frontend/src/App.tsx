@@ -195,7 +195,16 @@ function App() {
     if (confirmTimerRef.current) window.clearTimeout(confirmTimerRef.current);
     setConfirmingReset(false);
     (async () => {
-      await api.reset();
+      try {
+        await api.reset();
+      } catch (err) {
+        // The backend now refuses this (409) if a run started between this click and the request
+        // landing -- e.g. a direct API call or a second browser tab, since the `running` guard
+        // above only covers this one tab's own view of things.
+        const raw = err instanceof Error ? err.message : "Reset failed";
+        setError(extractErrorReason(raw) || "Reset failed — try again.");
+        return;
+      }
       setStartingBalance(null);
       setPayments([]);
       await refreshTickets();

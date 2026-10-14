@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -36,6 +37,16 @@ WORKING_DB = ROOT / "data" / "campus_customs_new.db"
 
 app = FastAPI(title="Campus Customs Backend")
 
+# /reset does a raw OS-level file copy over WORKING_DB with no awareness of SQLite locking --
+# today's other race fixes (atomic SQL writes, the audit-log lock) all protect writes *within* one
+# sqlite transaction, but none of them stop a reset's file-level overwrite from landing mid-run
+# while a ticket's agent team (a separate MCP subprocess) still has that same file open. The
+# frontend already disables its own "Reset database" button while a run is in flight, but that's a
+# UI-only guard -- a direct API call or a second browser tab bypasses it entirely (something this
+# project's own live testing actually did more than once). This counter closes that gap server-side.
+_active_runs = 0
+_active_runs_lock = threading.Lock()
+
 app.add_middleware(
     CORSMiddleware,
     # The Vite dev server (frontend/) runs on 5173 by default — allow both localhost and
@@ -55,10 +66,16 @@ def get_tickets() -> list[dict[str, Any]]:
 @app.post("/tickets/{ticket_id}/run")
 async def run_ticket_route(ticket_id: int) -> dict[str, Any]:
     """Run the agent team on one ticket and return Boss's final decision."""
+    global _active_runs
+    with _active_runs_lock:
+        _active_runs += 1
     try:
         decision = await run_ticket(ticket_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"agent run failed: {exc!r}") from exc
+    finally:
+        with _active_runs_lock:
+            _active_runs -= 1
     return decision.model_dump()
 
 
@@ -111,7 +128,16 @@ def get_cash() -> list[dict[str, Any]]:
 
 @app.post("/reset")
 def reset_database() -> dict[str, Any]:
-    """Reset the working database back to the original values, for a fresh run."""
+    """Reset the working database back to the original values, for a fresh run.
+
+    Refuses while a ticket run is in flight: the copy below is a raw OS-level file overwrite with
+    no awareness of SQLite locking, and a ticket's agent team writes to this same file from a
+    separate MCP subprocess throughout its run. Landing mid-run could torn-write the file or
+    silently discard a commit that was about to land.
+    """
+    with _active_runs_lock:
+        if _active_runs > 0:
+            raise HTTPException(status_code=409, detail="refused: a ticket run is in progress, wait for it to finish before resetting")
     shutil.copyfile(ORIGINAL_DB, WORKING_DB)
     audit.log_event(run_id="system", agent="system", ticket_id=None, depth=0, event="database_reset")
     return {"reset": True}
