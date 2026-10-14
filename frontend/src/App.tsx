@@ -350,7 +350,20 @@ function App() {
           </div>
 
           {approvalContext && selectedTicket && (
-            <ApprovalPrompt context={approvalContext} ticketId={selectedTicket.id} onApproved={handleApproved} />
+            // ApprovalPrompt keeps its own "declined"/"done" state locally with no reset path --
+            // without a key tied to what's actually being asked about, switching to a different
+            // ticket (or re-running this same one after declining) would leave it stuck showing
+            // the previous decision instead of the new approval request. events.length looked
+            // like a reasonable key at first but doesn't work: GET /events caps at 200, so a
+            // ticket with enough accumulated history keeps the same length across runs even
+            // though its content changed. The last event's own timestamp always changes instead,
+            // regardless of how long the ticket's history is or where the cap truncates it.
+            <ApprovalPrompt
+              key={`${selectedTicket.id}-${events[events.length - 1]?.ts ?? ""}`}
+              context={approvalContext}
+              ticketId={selectedTicket.id}
+              onApproved={handleApproved}
+            />
           )}
         </div>
       </div>
