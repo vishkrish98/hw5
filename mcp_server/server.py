@@ -391,35 +391,41 @@ def pay_invoice(invoice_id: int, account: str, approved_by: str) -> dict:
     if invoice is None:
         conn.close()
         return {"invoice_id": invoice_id, "paid": False, "reason": "no such invoice"}
-    cash = conn.execute("SELECT * FROM cash_accounts WHERE name = ?", (account,)).fetchone()
-    if cash is None:
-        conn.close()
-        return {"invoice_id": invoice_id, "paid": False, "reason": f"no such cash account '{account}'"}
     amount = invoice["amount"]
     today = _today(conn)
 
-    # The SELECTs above are for reading values to report/insert, not for enforcing the rule --
-    # two near-simultaneous calls for the same invoice could both read it as still 'open' before
-    # either commits. The UPDATEs below are what actually enforce it: each is conditioned on the
-    # state still being valid *at the moment of writing*, and SQLite serializes concurrent writers
-    # on the same file, so the second call's UPDATE genuinely sees the first call's committed
-    # result rather than a stale read. A rowcount of 0 means the condition failed for real.
+    # The SELECT above is for reading values to report/insert, not for enforcing the rule -- two
+    # near-simultaneous calls for the same invoice could both read it as still 'open' before either
+    # commits. The UPDATE below is what actually enforces it: it's conditioned on the state still
+    # being valid *at the moment of writing*, and SQLite serializes concurrent writers on the same
+    # file, so the second call's UPDATE genuinely sees the first call's committed result rather
+    # than a stale read. A rowcount of 0 means the condition failed for real.
     claimed = conn.execute("UPDATE invoices SET status = 'paid' WHERE id = ? AND status = 'open'", (invoice_id,))
     if claimed.rowcount == 0:
         conn.rollback()
+        # Re-read current status for the message rather than using the pre-write `invoice` row --
+        # that one can be stale in exactly the race this function guards against (another call
+        # already flipped it to 'paid' between our SELECT and this UPDATE), and reporting the old
+        # value here would self-contradictorily say "status is 'open', not open".
+        current_status = conn.execute("SELECT status FROM invoices WHERE id = ?", (invoice_id,)).fetchone()["status"]
         conn.close()
-        return {"invoice_id": invoice_id, "paid": False, "reason": f"refused: invoice status is '{invoice['status']}', not open"}
+        return {"invoice_id": invoice_id, "paid": False, "reason": f"refused: invoice status is '{current_status}', not open"}
+    if conn.execute("SELECT 1 FROM cash_accounts WHERE name = ?", (account,)).fetchone() is None:
+        conn.rollback()
+        conn.close()
+        return {"invoice_id": invoice_id, "paid": False, "reason": f"no such cash account '{account}'"}
     debited = conn.execute(
         "UPDATE cash_accounts SET balance = balance - ?, date = ? WHERE name = ? AND balance >= ?",
         (amount, today.isoformat(), account, amount),
     )
     if debited.rowcount == 0:
         conn.rollback()
+        current_balance = conn.execute("SELECT balance FROM cash_accounts WHERE name = ?", (account,)).fetchone()["balance"]
         conn.close()
         return {
             "invoice_id": invoice_id,
             "paid": False,
-            "reason": f"refused: insufficient cash (balance {cash['balance']} < amount {amount})",
+            "reason": f"refused: insufficient cash (balance {current_balance} < amount {amount})",
         }
     conn.execute(
         "INSERT INTO payments (kind, ref_id, amount, account, paid_at, approved_by) VALUES ('invoice', ?, ?, ?, ?, ?)",
@@ -445,13 +451,29 @@ def pay_lease(lease_id: int, account: str, approved_by: str) -> dict:
     if lease is None:
         conn.close()
         return {"lease_id": lease_id, "paid": False, "reason": "no such lease"}
-    cash = conn.execute("SELECT * FROM cash_accounts WHERE name = ?", (account,)).fetchone()
-    if cash is None:
+    if conn.execute("SELECT 1 FROM cash_accounts WHERE name = ?", (account,)).fetchone() is None:
         conn.close()
         return {"lease_id": lease_id, "paid": False, "reason": f"no such cash account '{account}'"}
     amount = lease["monthly_rent"]
     today = _today(conn)
-    next_due = _add_month(date.fromisoformat(lease["next_due"])).isoformat()
+    next_due_before = lease["next_due"]
+    next_due_after = _add_month(date.fromisoformat(next_due_before)).isoformat()
+
+    # Unlike invoices, leases have no status column to atomically "claim" -- the balance check
+    # alone only stops the balance from going negative, it does nothing to stop the SAME lease
+    # being paid twice concurrently when the balance happens to cover both charges (two near-
+    # simultaneous approvals would both read the same next_due, both pass the balance check, and
+    # both insert a payment for the same month, with next_due only advancing once). Conditioning
+    # this UPDATE on next_due still matching what we read makes it a single-use claim the same way
+    # pay_invoice's status column is: only the first of two concurrent calls can match the WHERE.
+    claimed = conn.execute(
+        "UPDATE leases SET next_due = ? WHERE id = ? AND next_due = ?",
+        (next_due_after, lease_id, next_due_before),
+    )
+    if claimed.rowcount == 0:
+        conn.rollback()
+        conn.close()
+        return {"lease_id": lease_id, "paid": False, "reason": "refused: lease was already paid for this cycle by a concurrent request"}
 
     # Same reasoning as pay_invoice: the SELECT above is only for reading the amount to report,
     # not for enforcing the rule. This UPDATE is conditioned on the balance still being sufficient
@@ -463,21 +485,21 @@ def pay_lease(lease_id: int, account: str, approved_by: str) -> dict:
     )
     if debited.rowcount == 0:
         conn.rollback()
+        current_balance = conn.execute("SELECT balance FROM cash_accounts WHERE name = ?", (account,)).fetchone()["balance"]
         conn.close()
         return {
             "lease_id": lease_id,
             "paid": False,
-            "reason": f"refused: insufficient cash (balance {cash['balance']} < amount {amount})",
+            "reason": f"refused: insufficient cash (balance {current_balance} < amount {amount})",
         }
     conn.execute(
         "INSERT INTO payments (kind, ref_id, amount, account, paid_at, approved_by) VALUES ('lease', ?, ?, ?, ?, ?)",
         (lease_id, amount, account, today.isoformat(), approved_by),
     )
-    conn.execute("UPDATE leases SET next_due = ? WHERE id = ?", (next_due, lease_id))
     conn.commit()
     new_balance = conn.execute("SELECT balance FROM cash_accounts WHERE name = ?", (account,)).fetchone()["balance"]
     conn.close()
-    return {"lease_id": lease_id, "paid": True, "amount": amount, "next_due": next_due, "approved_by": approved_by, "new_balance": new_balance}
+    return {"lease_id": lease_id, "paid": True, "amount": amount, "next_due": next_due_after, "approved_by": approved_by, "new_balance": new_balance}
 
 
 if __name__ == "__main__":
