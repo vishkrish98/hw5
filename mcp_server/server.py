@@ -9,6 +9,7 @@ data/campus_customs_new.db, and every write enforces the shop's own rules
 level so the rule holds even if a tool is called directly, outside an agent.
 """
 
+import calendar
 import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
@@ -35,8 +36,13 @@ def _today(conn: sqlite3.Connection) -> date:
 
 def _add_month(d: date) -> date:
     if d.month == 12:
-        return d.replace(year=d.year + 1, month=1)
-    return d.replace(month=d.month + 1)
+        year, month = d.year + 1, 1
+    else:
+        year, month = d.year, d.month + 1
+    # Clamp the day instead of letting e.g. Jan 31 -> Feb 31 raise ValueError: the target
+    # month may have fewer days than the source month.
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return d.replace(year=year, month=month, day=day)
 
 
 # ---------------------------------------------------------------------------
@@ -422,7 +428,7 @@ def pay_lease(lease_id: int, account: str, approved_by: str) -> dict:
     today = _today(conn)
     next_due = _add_month(date.fromisoformat(lease["next_due"])).isoformat()
     conn.execute(
-        "INSERT INTO payments (kind, ref_id, amount, account, paid_at, approved_by) VALUES ('rent', ?, ?, ?, ?, ?)",
+        "INSERT INTO payments (kind, ref_id, amount, account, paid_at, approved_by) VALUES ('lease', ?, ?, ?, ?, ?)",
         (lease_id, amount, account, today.isoformat(), approved_by),
     )
     conn.execute("UPDATE leases SET next_due = ? WHERE id = ?", (next_due, lease_id))

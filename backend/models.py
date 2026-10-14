@@ -106,6 +106,18 @@ class CustomerMessageDraft(BaseModel):
         ..., description="Anything the draft depends on (e.g. an ETA or discount) that Boss must confirm before closing the ticket."
     )
 
+    @property
+    def summary(self) -> str:
+        # backend/agents.py's delegate-report builder reads `summary` off every specialist's
+        # output generically (`getattr(output, "summary", None) or ... or str(output)`). Without
+        # this property, CustomerMessageDraft has neither `summary` nor `decision_summary`, so it
+        # fell through to a bare `str(output)` repr — one undifferentiated blob mashing `body`
+        # (customer-facing) and `note_to_boss` (Boss-only) together with no label distinguishing
+        # them, contradicting customer_service.md/boss.md's description of Boss receiving the
+        # draft's `body` as its own field. Labeling them here keeps that contract true without
+        # asking the model to produce yet another field.
+        return f'Drafted a reply to {self.to} ("{self.subject}"): {self.body} — Note to Boss: {self.note_to_boss}'
+
 
 class BossDecision(BaseModel):
     """Boss's final call on a ticket, after delegating to whichever specialists were needed."""
