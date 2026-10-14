@@ -69,7 +69,7 @@ Agents are PydanticAI `Agent`s (`backend/agents.py`), all on the same model (`gp
 
 Accounting has **no** `pay_invoice`/`pay_lease` in its toolset — not gated, not hidden behind an approval flag, just absent. It cannot execute a payment no matter what the model decides; it can only return an `AccountingAssessment` recommendation. Only Boss can write back to a ticket (`update_ticket`); only Boss decides whether a Customer Service draft gets copied into a ticket's `notes`.
 
-### Full MCP tool roster (15 tools)
+### Full MCP tool roster as of Problem 5 (15 tools — `list_tickets` is added in Problem 7; see "Final reference" below for the current 16-tool roster)
 
 | Tool | Reads/writes | Used by |
 |---|---|---|

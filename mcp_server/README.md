@@ -15,6 +15,7 @@ stays untouched as the reset point).
 **Tickets** (the work queue — Boss)
 - `get_today()` — reads `desk`. The shop's "today," used for every overdue/due-soon check.
 - `list_open_tickets()` — reads `tickets`. The board Boss triages first.
+- `list_tickets()` — reads `tickets`. Every ticket regardless of status; not used by any agent (Boss uses `list_open_tickets`), only by the dashboard's `GET /tickets` route (Problem 7) to show the whole board.
 - `get_ticket(ticket_id)` — reads `tickets`. Full ticket row by id.
 - `update_ticket(ticket_id, status, notes)` — writes `tickets`. The final call on a ticket; reserved for Boss.
 

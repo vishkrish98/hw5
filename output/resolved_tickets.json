@@ -17,8 +17,7 @@
         "customer_service": "Drafted a cautious, no-date-promised reply to the requester (Tauhid Zaman) explaining the tee was out of stock; draft was recorded in ticket notes, never sent."
       },
       "human_approvals": [
-        { "kind": "invoice", "ref_id": 501, "amount": 840.00, "approved_by": "Vish (store manager)", "reason": "Unblocks vendor 1 so a restock can be ordered." },
-        { "kind": "invoice", "ref_id": 502, "amount": 8.00, "approved_by": "Vish (store manager)", "reason": "Paid early (before its due date) to re-unblock vendor 1 for ticket 103, which shares the same vendor." }
+        { "kind": "invoice", "ref_id": 501, "amount": 840.00, "approved_by": "Vish (store manager)", "reason": "Unblocks vendor 1 so a restock can be ordered." }
       ]
     },
     {
@@ -52,7 +51,7 @@
         "customer_service": "Drafted an unsent reply to Yale AI Club asking them to specify the discount they're requesting, with no price or fulfillment promised."
       },
       "human_approvals": [
-        { "kind": "invoice", "ref_id": 502, "amount": 8.00, "approved_by": "Vish (store manager)", "reason": "Shared with ticket 101 -- paid to re-unblock vendor 1 for this ticket's hoodie restock." }
+        { "kind": "invoice", "ref_id": 502, "amount": 8.00, "approved_by": "Vish (store manager)", "reason": "Invoice 502 was created by ticket 101's own restock order, but paid early under this ticket (per output/audit_trail.json's payment_approved event, ticket_id 103) specifically to re-unblock vendor 1 for this ticket's hoodie restock." }
       ],
       "known_limitation": "No backend action exists for a human to approve a discount/price override (only pay_invoice/pay_lease exist). A human would need to decide on a discount percentage outside this system and communicate it back before Accounting could finalize the override."
     }
