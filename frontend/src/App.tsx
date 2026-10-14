@@ -210,8 +210,13 @@ function App() {
   const showHistory = running || (selectedTicket ? selectedTicket.status !== "open" : false);
   const displayEvents = showHistory ? latestRunOnly(events) : [];
 
+  // boss.md defines "blocked" as the status for a vendor blocked by its own unpaid invoice "and
+  // nobody has approved paying it yet" -- the same "needs a payment approved" situation as
+  // pending_human_approval, just worded differently. Boss's live output isn't deterministic about
+  // which of the two it picks for an identical situation, so the approval card has to cover both
+  // or a run that lands on "blocked" leaves no way to actually approve the payment that unblocks it.
   const approvalContext =
-    selectedTicket && selectedTicket.status === "pending_human_approval"
+    selectedTicket && (selectedTicket.status === "pending_human_approval" || selectedTicket.status === "blocked")
       ? deriveApprovalContext(selectedTicket, displayEvents, lastDecision)
       : null;
 
