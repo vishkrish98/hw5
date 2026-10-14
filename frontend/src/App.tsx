@@ -17,6 +17,26 @@ const STATUS_COPY: Record<string, string> = {
   open: "Open",
 };
 
+/** api.ts's request() always throws `Error(\`${method} ${path} failed (${status}): ${body}\`)`,
+ * where body is FastAPI's own response text -- typically `{"detail": "..."}` JSON, but the detail
+ * string itself can contain colons (e.g. a wrapped exception repr like "Error code: 529 - ...").
+ * A colon-based regex can't tell "the prefix's colon" from "a colon inside the real message", so
+ * it previously grabbed whatever followed the LAST colon in the whole string -- a garbled tail
+ * fragment for any error with more than one colon in it. Strip the known "... (NNN): " prefix
+ * directly instead, then parse the remainder as JSON for FastAPI's `detail` field. */
+function extractErrorReason(raw: string): string | undefined {
+  const prefixMatch = raw.match(/^.*?\(\d+\):\s*/);
+  const bodyText = prefixMatch ? raw.slice(prefixMatch[0].length) : raw;
+  try {
+    const parsed = JSON.parse(bodyText);
+    if (typeof parsed.detail === "string") return parsed.detail;
+    if (parsed.detail !== undefined) return JSON.stringify(parsed.detail);
+  } catch {
+    // Not JSON -- fall through to the raw body text.
+  }
+  return bodyText.trim() || undefined;
+}
+
 function shorten(text: string, max = 110): string {
   const firstSentence = text.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? text;
   const base = firstSentence.length <= max ? firstSentence : text;
@@ -138,8 +158,7 @@ function App() {
       await Promise.all([refreshTickets(), refreshEvents(selectedId), refreshCash()]);
     } catch (err) {
       const raw = err instanceof Error ? err.message : "Agent run failed";
-      const friendly = raw.match(/:\s*([^:]+?)\)?$/)?.[1]?.trim();
-      setError(friendly || "The agent run didn't complete — the shared model endpoint can be flaky. Try again.");
+      setError(extractErrorReason(raw) || "The agent run didn't complete — the shared model endpoint can be flaky. Try again.");
       await Promise.all([refreshTickets(), refreshEvents(selectedId), refreshCash()]);
     } finally {
       if (pollRef.current) {
@@ -161,6 +180,13 @@ function App() {
   }
 
   function handleResetClick() {
+    // Reset overwrites the working database file in one synchronous copy (backend/main.py's
+    // /reset route), while a live run holds open sqlite connections against that same file across
+    // several agent/tool calls. Firing a reset mid-run doesn't just confuse the display -- it can
+    // run against a half-copied file or leave the UI repainted with a blend of pre- and
+    // post-reset state. Every other mutating control is already disabled during a run; this guard
+    // makes Reset consistent with them rather than the one exception.
+    if (running) return;
     if (!confirmingReset) {
       setConfirmingReset(true);
       confirmTimerRef.current = window.setTimeout(() => setConfirmingReset(false), 4000);
@@ -231,7 +257,11 @@ function App() {
         </div>
         <div className="topbar-right">
           <CashPill balance={cash} />
-          <button className={`ghost-btn${confirmingReset ? " confirm" : ""}`} onClick={handleResetClick}>
+          <button
+            className={`ghost-btn${confirmingReset ? " confirm" : ""}`}
+            onClick={handleResetClick}
+            disabled={running}
+          >
             {confirmingReset ? "Click again to confirm" : "Reset database"}
           </button>
         </div>
@@ -356,10 +386,15 @@ function App() {
             // the previous decision instead of the new approval request. events.length looked
             // like a reasonable key at first but doesn't work: GET /events caps at 200, so a
             // ticket with enough accumulated history keeps the same length across runs even
-            // though its content changed. The last event's own timestamp always changes instead,
-            // regardless of how long the ticket's history is or where the cap truncates it.
+            // though its content changed. The last event's own timestamp works instead -- except
+            // payment_approved events (logged with the "human-approval" sentinel run_id, not a
+            // real agent run) must be excluded from it: approving a payment appends exactly one
+            // of these, which would otherwise change the key and remount the component right as
+            // it's trying to show its own "Approved" confirmation for that very payment.
             <ApprovalPrompt
-              key={`${selectedTicket.id}-${events[events.length - 1]?.ts ?? ""}`}
+              key={`${selectedTicket.id}-${
+                [...events].reverse().find((e) => e.event !== "payment_approved")?.ts ?? ""
+              }`}
               context={approvalContext}
               ticketId={selectedTicket.id}
               onApproved={handleApproved}

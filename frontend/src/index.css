@@ -137,6 +137,8 @@ select:focus-visible,
 
 .ghost-btn:hover { color: #fdf6e6; border-color: var(--accent); }
 .ghost-btn.confirm { color: #ffb4b4; border-color: #ffb4b4; background: rgba(161, 61, 61, 0.25); }
+.ghost-btn:disabled { opacity: 0.5; cursor: default; }
+.ghost-btn:disabled:hover { color: #cdd7ea; border-color: rgba(253, 246, 230, 0.35); }
 
 /* ---------- Hero ---------- */
 

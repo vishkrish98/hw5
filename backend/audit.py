@@ -10,6 +10,7 @@ anywhere else, or you'll reset history.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,16 @@ from typing import Any
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 
 AUDIT_PATH = Path(__file__).resolve().parent.parent / "output" / "audit_trail.json"
+
+# FastAPI runs sync routes (e.g. POST /payments/approve) on a thread-pool thread, genuinely
+# concurrently with the event loop thread running an in-flight async /tickets/{id}/run -- both
+# can call append_events at the same moment. Without this lock, two overlapping read-modify-write
+# cycles on the same file can interleave their writes and leave output/audit_trail.json containing
+# invalid JSON (observed directly: concurrent payment approvals during a live run corrupted the
+# file and 500'd every subsequent read/write until fixed by hand). A single process-wide lock is
+# sufficient here because this whole app is one uvicorn process -- there's no second process also
+# writing this file to coordinate with.
+_lock = threading.Lock()
 
 
 def _now() -> str:
@@ -33,11 +44,12 @@ def read_events() -> list[dict[str, Any]]:
 def append_events(events: list[dict[str, Any]]) -> None:
     """Append one or more audit events to output/audit_trail.json without wiping prior runs."""
     AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    existing: list[dict[str, Any]] = []
-    if AUDIT_PATH.exists() and AUDIT_PATH.stat().st_size > 0:
-        existing = json.loads(AUDIT_PATH.read_text())
-    existing.extend(events)
-    AUDIT_PATH.write_text(json.dumps(existing, indent=2, default=str))
+    with _lock:
+        existing: list[dict[str, Any]] = []
+        if AUDIT_PATH.exists() and AUDIT_PATH.stat().st_size > 0:
+            existing = json.loads(AUDIT_PATH.read_text())
+        existing.extend(events)
+        AUDIT_PATH.write_text(json.dumps(existing, indent=2, default=str))
 
 
 def log_agent_messages(

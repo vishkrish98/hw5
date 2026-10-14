@@ -156,22 +156,34 @@ def adjust_inventory(sku: str, size: str, delta: int, reason: str) -> dict:
     if row is None:
         conn.close()
         return {"sku": sku, "size": size, "found": False, "applied": False, "reason": "no such sku/size"}
-    new_qty = row["qty"] + delta
-    if new_qty < 0:
+
+    # Use a relative, conditioned UPDATE rather than writing a qty computed from the read above --
+    # two near-simultaneous calls reading the same starting qty could otherwise both pass a
+    # "would it go negative" check taken before either commits and together still drive it negative
+    # (same race as pay_invoice/pay_lease's cash balance).
+    applied = conn.execute(
+        "UPDATE inventory SET qty = qty + ? WHERE sku = ? AND size = ? AND qty + ? >= 0",
+        (delta, sku, size, delta),
+    )
+    if applied.rowcount == 0:
+        conn.rollback()
+        current = conn.execute(
+            "SELECT qty FROM inventory WHERE sku = ? AND size = ?", (sku, size)
+        ).fetchone()
         conn.close()
         return {
             "sku": sku,
             "size": size,
             "found": True,
             "applied": False,
-            "reason": f"refused: qty would go negative ({row['qty']} + {delta} = {new_qty})",
+            "reason": f"refused: qty would go negative ({current['qty']} + {delta} = {current['qty'] + delta})",
         }
-    conn.execute(
-        "UPDATE inventory SET qty = ? WHERE sku = ? AND size = ?", (new_qty, sku, size)
-    )
     conn.commit()
+    new_row = conn.execute(
+        "SELECT qty FROM inventory WHERE sku = ? AND size = ?", (sku, size)
+    ).fetchone()
     conn.close()
-    return {"sku": sku, "size": size, "found": True, "applied": True, "qty": new_qty, "reason": reason}
+    return {"sku": sku, "size": size, "found": True, "applied": True, "qty": new_row["qty"], "reason": reason}
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +235,27 @@ def create_restock_order(
     comes from vendors.lead_days.
     """
     conn = _connect()
-    blocking = conn.execute(
-        "SELECT * FROM invoices WHERE vendor_id = ? AND status = 'open'", (vendor_id,)
-    ).fetchall()
-    if blocking:
+    today = _today(conn)
+    due_date = (today + timedelta(days=14)).isoformat()
+    amount = round(qty * unit_cost, 2)
+
+    # Checking for a blocking invoice with a SELECT and then separately INSERTing has the same
+    # race as pay_invoice/pay_lease's cash check: two near-simultaneous calls for the same vendor
+    # could both see no open invoice before either commits, and both insert. The WHERE NOT EXISTS
+    # makes the check part of the same atomic write instead of a separate read beforehand.
+    cur = conn.execute(
+        """
+        INSERT INTO invoices (vendor_id, amount, due_date, status, description)
+        SELECT ?, ?, ?, 'open', ?
+        WHERE NOT EXISTS (SELECT 1 FROM invoices WHERE vendor_id = ? AND status = 'open')
+        """,
+        (vendor_id, amount, due_date, description, vendor_id),
+    )
+    if cur.rowcount == 0:
+        conn.rollback()
+        blocking = conn.execute(
+            "SELECT * FROM invoices WHERE vendor_id = ? AND status = 'open'", (vendor_id,)
+        ).fetchall()
         conn.close()
         return {
             "vendor_id": vendor_id,
@@ -234,13 +263,6 @@ def create_restock_order(
             "reason": "refused: vendor has an open unpaid invoice and will not ship new product",
             "blocking_invoices": [dict(r) for r in blocking],
         }
-    today = _today(conn)
-    due_date = (today + timedelta(days=14)).isoformat()
-    amount = round(qty * unit_cost, 2)
-    cur = conn.execute(
-        "INSERT INTO invoices (vendor_id, amount, due_date, status, description) VALUES (?, ?, ?, 'open', ?)",
-        (vendor_id, amount, due_date, description),
-    )
     conn.commit()
     new_id = cur.lastrowid
     row = conn.execute("SELECT * FROM invoices WHERE id = ?", (new_id,)).fetchone()
@@ -369,34 +391,44 @@ def pay_invoice(invoice_id: int, account: str, approved_by: str) -> dict:
     if invoice is None:
         conn.close()
         return {"invoice_id": invoice_id, "paid": False, "reason": "no such invoice"}
-    if invoice["status"] != "open":
-        conn.close()
-        return {"invoice_id": invoice_id, "paid": False, "reason": f"refused: invoice status is '{invoice['status']}', not open"}
     cash = conn.execute("SELECT * FROM cash_accounts WHERE name = ?", (account,)).fetchone()
     if cash is None:
         conn.close()
         return {"invoice_id": invoice_id, "paid": False, "reason": f"no such cash account '{account}'"}
-    if cash["balance"] < invoice["amount"]:
+    amount = invoice["amount"]
+    today = _today(conn)
+
+    # The SELECTs above are for reading values to report/insert, not for enforcing the rule --
+    # two near-simultaneous calls for the same invoice could both read it as still 'open' before
+    # either commits. The UPDATEs below are what actually enforce it: each is conditioned on the
+    # state still being valid *at the moment of writing*, and SQLite serializes concurrent writers
+    # on the same file, so the second call's UPDATE genuinely sees the first call's committed
+    # result rather than a stale read. A rowcount of 0 means the condition failed for real.
+    claimed = conn.execute("UPDATE invoices SET status = 'paid' WHERE id = ? AND status = 'open'", (invoice_id,))
+    if claimed.rowcount == 0:
+        conn.rollback()
+        conn.close()
+        return {"invoice_id": invoice_id, "paid": False, "reason": f"refused: invoice status is '{invoice['status']}', not open"}
+    debited = conn.execute(
+        "UPDATE cash_accounts SET balance = balance - ?, date = ? WHERE name = ? AND balance >= ?",
+        (amount, today.isoformat(), account, amount),
+    )
+    if debited.rowcount == 0:
+        conn.rollback()
         conn.close()
         return {
             "invoice_id": invoice_id,
             "paid": False,
-            "reason": f"refused: insufficient cash (balance {cash['balance']} < amount {invoice['amount']})",
+            "reason": f"refused: insufficient cash (balance {cash['balance']} < amount {amount})",
         }
-    today = _today(conn)
     conn.execute(
         "INSERT INTO payments (kind, ref_id, amount, account, paid_at, approved_by) VALUES ('invoice', ?, ?, ?, ?, ?)",
-        (invoice_id, invoice["amount"], account, today.isoformat(), approved_by),
-    )
-    conn.execute("UPDATE invoices SET status = 'paid' WHERE id = ?", (invoice_id,))
-    conn.execute(
-        "UPDATE cash_accounts SET balance = balance - ?, date = ? WHERE name = ?",
-        (invoice["amount"], today.isoformat(), account),
+        (invoice_id, amount, account, today.isoformat(), approved_by),
     )
     conn.commit()
     new_balance = conn.execute("SELECT balance FROM cash_accounts WHERE name = ?", (account,)).fetchone()["balance"]
     conn.close()
-    return {"invoice_id": invoice_id, "paid": True, "amount": invoice["amount"], "approved_by": approved_by, "new_balance": new_balance}
+    return {"invoice_id": invoice_id, "paid": True, "amount": amount, "approved_by": approved_by, "new_balance": new_balance}
 
 
 @mcp.tool()
@@ -418,24 +450,30 @@ def pay_lease(lease_id: int, account: str, approved_by: str) -> dict:
         conn.close()
         return {"lease_id": lease_id, "paid": False, "reason": f"no such cash account '{account}'"}
     amount = lease["monthly_rent"]
-    if cash["balance"] < amount:
+    today = _today(conn)
+    next_due = _add_month(date.fromisoformat(lease["next_due"])).isoformat()
+
+    # Same reasoning as pay_invoice: the SELECT above is only for reading the amount to report,
+    # not for enforcing the rule. This UPDATE is conditioned on the balance still being sufficient
+    # at the moment of writing, closing the race where two near-simultaneous approvals could both
+    # pass a balance check taken before either commits and together drive it negative.
+    debited = conn.execute(
+        "UPDATE cash_accounts SET balance = balance - ?, date = ? WHERE name = ? AND balance >= ?",
+        (amount, today.isoformat(), account, amount),
+    )
+    if debited.rowcount == 0:
+        conn.rollback()
         conn.close()
         return {
             "lease_id": lease_id,
             "paid": False,
             "reason": f"refused: insufficient cash (balance {cash['balance']} < amount {amount})",
         }
-    today = _today(conn)
-    next_due = _add_month(date.fromisoformat(lease["next_due"])).isoformat()
     conn.execute(
         "INSERT INTO payments (kind, ref_id, amount, account, paid_at, approved_by) VALUES ('lease', ?, ?, ?, ?, ?)",
         (lease_id, amount, account, today.isoformat(), approved_by),
     )
     conn.execute("UPDATE leases SET next_due = ? WHERE id = ?", (next_due, lease_id))
-    conn.execute(
-        "UPDATE cash_accounts SET balance = balance - ?, date = ? WHERE name = ?",
-        (amount, today.isoformat(), account),
-    )
     conn.commit()
     new_balance = conn.execute("SELECT balance FROM cash_accounts WHERE name = ?", (account,)).fetchone()["balance"]
     conn.close()
