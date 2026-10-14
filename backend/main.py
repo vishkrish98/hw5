@@ -11,6 +11,7 @@ thin plumbing between the database/agents and the dashboard.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sys
 import threading
@@ -70,7 +71,16 @@ async def run_ticket_route(ticket_id: int) -> dict[str, Any]:
     with _active_runs_lock:
         _active_runs += 1
     try:
-        decision = await run_ticket(ticket_id)
+        # The 60s timeout in backend/agents.py's OpenAIResponsesModelSettings only bounds calls
+        # to the Portkey/model API -- it does nothing for the local MCP tool-call round-trip
+        # itself (the stdio request/response to an agent's own subprocess). Observed directly:
+        # that round-trip can hang indefinitely with no exception ever raised, which left this
+        # route (and the _active_runs counter above, permanently blocking /reset) stuck forever
+        # with no way to recover short of killing the process. Wrapping the whole run in a wall-
+        # clock timeout guarantees this route always eventually returns, one way or another.
+        decision = await asyncio.wait_for(run_ticket(ticket_id), timeout=180)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=f"agent run timed out after 180s for ticket {ticket_id} -- the shared model/MCP layer can hang with no exception; try again") from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"agent run failed: {exc!r}") from exc
     finally:
